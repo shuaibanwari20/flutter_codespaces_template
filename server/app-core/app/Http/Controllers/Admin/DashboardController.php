@@ -1,0 +1,83 @@
+<?php
+
+namespace App\Http\Controllers\Admin;
+
+use App\Http\Controllers\Controller;
+use App\Models\Attendance;
+use App\Models\Leave;
+use App\Models\Midwife;
+use App\Support\AttendanceService;
+use App\Support\DariDate;
+use Illuminate\View\View;
+
+/**
+ * Today's live dashboard for all 42 midwives.
+ * Statuses: on_time (سبز) | late (زرد) | not_arrived/absent (سرخ) | leave (خاکستری) | friday
+ */
+class DashboardController extends Controller
+{
+    public function index(): View
+    {
+        $now = AttendanceService::now();
+        $today = $now->toDateString();
+        $lateUntil = AttendanceService::lateUntil();
+        $isFriday = $now->isFriday();
+
+        $attendances = Attendance::with('cluster')
+            ->whereDate('attendance_date', $today)
+            ->get()
+            ->keyBy('midwife_id');
+
+        $leaveIds = Leave::where('status', 'approved')
+            ->whereDate('from_date', '<=', $today)
+            ->whereDate('to_date', '>=', $today)
+            ->pluck('midwife_id')
+            ->all();
+
+        $rows = [];
+        $counts = ['on_time' => 0, 'late' => 0, 'absent' => 0, 'leave' => 0, 'friday' => 0];
+
+        $midwives = Midwife::with('cluster')->orderBy('code')->get();
+
+        foreach ($midwives as $midwife) {
+            $attendance = $attendances->get($midwife->id);
+
+            if ($attendance) {
+                $state = $attendance->status; // on_time | late
+                $label = $attendance->status === 'on_time' ? 'حاضر به‌وقت' : 'دیرکرد';
+            } elseif ($isFriday) {
+                $state = 'friday';
+                $label = 'روز رخصتی (جمعه)';
+            } elseif (in_array($midwife->id, $leaveIds, true)) {
+                $state = 'leave';
+                $label = 'رخصتی';
+            } elseif ($now->greaterThan($lateUntil)) {
+                $state = 'absent';
+                $label = 'غایب';
+            } else {
+                $state = 'not_arrived';
+                $label = 'هنوز نرسیده';
+            }
+
+            $counts[$state === 'not_arrived' ? 'absent' : $state] = ($counts[$state === 'not_arrived' ? 'absent' : $state] ?? 0) + 1;
+
+            $rows[] = [
+                'midwife' => $midwife,
+                'attendance' => $attendance,
+                'state' => $state,
+                'label' => $label,
+                'time' => $attendance ? DariDate::time($attendance->checked_at_server) : '—',
+                'distance' => $attendance ? DariDate::en((string) round((float) $attendance->distance_m)).' متر' : '—',
+            ];
+        }
+
+        return view('admin.dashboard', [
+            'rows' => $rows,
+            'counts' => $counts,
+            'total' => $midwives->count(),
+            'now' => $now,
+            'todayLabel' => DariDate::full($now),
+            'timeLabel' => DariDate::time($now),
+        ]);
+    }
+}
